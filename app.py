@@ -11,7 +11,9 @@ import secrets
 import zipfile
 
 from db import (init_schema, store_file, get_file, create_job, get_job,
-                update_job_progress, complete_job, fail_job, cleanup_old_jobs)
+                update_job_progress, complete_job, fail_job, cleanup_old_jobs,
+                count_active_jobs_for_user, count_all_active_jobs,
+                get_oldest_queued_job, queue_job, get_conn)
 
 # --- Configuration ---
 def load_dotenv_file(dotenv_path):
@@ -470,6 +472,14 @@ HTML_TEMPLATE = """
                     return;
                 }
 
+                if (data.mode === 'queued') {
+                    consoleOutput.innerHTML += `<div class="text-yellow-400 p-2">${data.message || 'Job queued — will process when DeBounce is free.'}</div>`;
+                    statusTitle.innerText = "Queued";
+                    statusDesc.innerText = `${data.submitted_total} emails waiting`;
+                    finishValidation();
+                    return;
+                }
+
                 consoleOutput.innerHTML += `<div class="text-red-500 p-2">Unsupported response mode.</div>`;
                 finishValidation();
             } catch (err) {
@@ -780,6 +790,44 @@ def bulk_api_upload(file_url):
     return list_id, None
 
 
+def process_queue():
+    """Process the next queued job if DeBounce is free."""
+    try:
+        if count_all_active_jobs() > 1:  # only queued jobs remain
+            return
+
+        queued = get_oldest_queued_job()
+        if not queued:
+            return
+
+        logger.info("Processing queued job list_id=%s", queued["list_id"])
+
+        # Get file and construct URL
+        f = get_file(queued["token"])
+        if not f:
+            fail_job(queued["list_id"])
+            return
+
+        file_url = public_url(f"/bulk/file/{queued['token']}.txt")
+        list_id, err = bulk_api_upload(file_url)
+        if err:
+            if "maximum number" not in err.lower() and "existing request" not in err.lower():
+                fail_job(queued["list_id"])
+            return
+
+        # Update the queued job with real list_id and set to processing
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE validation_jobs SET list_id = %s, status = 'processing', updated_at = now() WHERE id = %s",
+                    (list_id, queued["id"]),
+                )
+            conn.commit()
+        logger.info("Queued job %d now processing with list_id=%s", queued["id"], list_id)
+    except Exception:
+        logger.exception("process_queue failed")
+
+
 def bulk_api_status(list_id):
     if not has_api_key():
         return None, "Missing DEBOUNCE_API_KEY"
@@ -870,6 +918,7 @@ def bulk_status():
 
     if status_data.get("download_link") and job:
         complete_job(list_id, status_data["download_link"])
+        process_queue()  # process next queued job
 
     return jsonify(status_data)
 
@@ -980,6 +1029,7 @@ def bulk_results_stream():
             ) + "\n"
 
         yield json.dumps({"type": "complete"}) + "\n"
+        process_queue()  # process next queued job
 
     return Response(stream_with_context(generate()), mimetype="application/x-ndjson")
 
@@ -994,6 +1044,11 @@ def validate():
     filter_free = request.form.get("filter_free") == "true"
     uid_str = request.form.get("uid", "anonymous").strip()
     uid_int = (abs(hash(uid_str)) % (2**31 - 1)) or 1
+
+    # Rate limit: check if user already has a processing job
+    active_user_jobs = count_active_jobs_for_user(uid_int)
+    if active_user_jobs > 0:
+        return jsonify({"error": "You already have a validation in progress. Wait for it to complete first."}), 429
 
     try:
         content = file.stream.read().decode("utf-8", errors="ignore")
@@ -1039,6 +1094,19 @@ def validate():
     file_url = public_url(f"/bulk/file/{token}.txt")
     list_id, err = bulk_api_upload(file_url)
     if err:
+        # If DeBounce is busy, queue the job instead of rejecting
+        if "maximum number" in err.lower() or "existing request" in err.lower():
+            fake_list_id = f"queued_{token[:16]}"
+            queue_job(fake_list_id, len(submit_emails), filtered_total, invalid_total, token, user_id=uid_int)
+            return jsonify({
+                "mode": "queued",
+                "list_id": fake_list_id,
+                "message": "DeBounce is currently processing another list. Your job is queued and will be processed automatically.",
+                "submitted_total": len(submit_emails),
+                "filtered_total": filtered_total,
+                "invalid_total": invalid_total,
+            }), 202
+
         get_file(token)  # verify it exists, will be cleaned up by TTL
         return jsonify({"error": err}), 400
 

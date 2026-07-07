@@ -156,3 +156,54 @@ def cleanup_old_jobs(max_age_s: int = 86400):
         conn.commit()
     if deleted:
         logger.info("Cleaned up %d old jobs", deleted)
+
+
+def count_active_jobs_for_user(user_id: int) -> int:
+    """Count jobs for a user that are still processing."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM validation_jobs WHERE user_id = %s AND status = 'processing'",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            return row["cnt"] if row else 0
+
+
+def count_all_active_jobs() -> int:
+    """Count all jobs currently processing (across all users)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS cnt FROM validation_jobs WHERE status IN ('processing', 'queued')")
+            row = cur.fetchone()
+            return row["cnt"] if row else 0
+
+
+def get_oldest_queued_job() -> dict | None:
+    """Get the oldest queued job to process next."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM validation_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def queue_job(list_id: str, submitted_total: int, filtered_total: int,
+              invalid_total: int, token: str, user_id: int = 1) -> dict:
+    """Insert a job as 'queued' (will be processed when DeBounce is free)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO validation_jobs
+                   (list_id, user_id, submitted_total, filtered_total, invalid_total,
+                    token, status, valid_count, filtered_count, invalid_count, processed)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'queued', 0, 0, 0, 0)
+                   RETURNING *""",
+                (list_id, user_id, submitted_total, filtered_total, invalid_total, token),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    logger.info("Queued job list_id=%s total=%d", list_id, submitted_total)
+    return dict(row)
