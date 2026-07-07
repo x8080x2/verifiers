@@ -14,7 +14,7 @@ from db import (init_schema, store_file, get_file, create_job, get_job,
                 update_job_progress, complete_job, fail_job, cleanup_old_jobs,
                 count_active_jobs_for_user, count_all_active_jobs,
                 get_oldest_queued_job, queue_job, get_conn,
-                get_balance, add_credits, create_payment_request,
+                get_balance, add_credits, deduct_credits, create_payment_request,
                 get_payment_request, approve_payment, deny_payment)
 
 # --- Configuration ---
@@ -59,6 +59,31 @@ BTC_WALLET = os.getenv("BTC_WALLET", "")
 USDT_TRC20_WALLET = os.getenv("USDT_TRC20_WALLET", "")
 USDT_ERC20_WALLET = os.getenv("USDT_ERC20_WALLET", "")
 
+# Credit pricing tiers (credits -> USD)
+CREDIT_TIERS = [
+    (50000, 100.00),
+    (100000, 180.00),
+    (200000, 266.67),
+    (500000, 600.00),
+    (1000000, 1000.00),
+    (2000000, 1733.33),
+]
+
+# Cost per email validation (in credits)
+CREDITS_PER_EMAIL = int(os.getenv("CREDITS_PER_EMAIL", "1"))
+
+def usd_to_credits(amount_usd: float) -> int:
+    """Convert USD amount to credits using the closest tier match."""
+    for credits, price in CREDIT_TIERS:
+        if abs(round(amount_usd, 2) - price) < 0.01:
+            return credits
+    # Fallback: approximate from the best tier
+    for credits, price in CREDIT_TIERS:
+        if amount_usd >= price * 0.99:
+            ratio = amount_usd / price
+            return int(credits * ratio)
+    return int(amount_usd * 500)  # default ~$0.002/credit
+
 # Telegram admin bot
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
@@ -101,6 +126,7 @@ HTML_TEMPLATE = """
 
     <script>
         window.USER_ID = "__USER_ID__";
+        window.BULK_MAX_EMAILS = 200000;
 
         tailwind.config = {
             theme: {
@@ -154,7 +180,7 @@ HTML_TEMPLATE = """
                 <div class="flex items-center gap-3">
                     <div id="balance-display" class="flex items-center gap-1.5 px-2 py-0.5 bg-amber-50 text-amber-800 rounded-full text-[9px] font-semibold border border-amber-200 cursor-pointer hover:bg-amber-100 transition-colors" onclick="openTopup()">
                         <i class="fas fa-coins text-[9px]"></i>
-                        <span>$<span id="balance-amount">0.00</span></span>
+                        <span><span id="balance-amount">0</span> credits</span>
                     </div>
                     <div id="status-badge" class="hidden md:flex items-center gap-1.5 px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full text-[9px] font-semibold border border-slate-200">
                         <span class="w-1.5 h-1.5 bg-slate-400 rounded-full"></span>
@@ -187,19 +213,26 @@ HTML_TEMPLATE = """
             <div class="lg:w-4/12 flex flex-col gap-2">
                 
                 <!-- Input Panel -->
-                <div class="rounded-lg p-3 flex flex-col bg-white border border-slate-200 shadow-sm" id="inputZone">
+                <div class="rounded-none p-3 flex flex-col bg-transparent border border-slate-200" id="inputZone" style="box-sizing: content-box; font-family: Helvetica, Arial, sans-serif; font-weight: 800; line-height: normal; box-shadow: none;">
                     <div class="flex items-center justify-between mb-2">
                         <h3 class="text-[11px] font-semibold text-slate-700">
                             <i class="fas fa-pen-to-square text-brand-600 mr-1.5"></i>Input Emails
                         </h3>
-                        <label class="flex items-center gap-1 text-[9px] text-slate-500 cursor-pointer select-none">
-                            <input type="checkbox" id="b2bCheck" class="w-3 h-3 rounded border-slate-300 text-brand-600">
-                            B2B Only
-                        </label>
+                        <div class="flex flex-col items-end gap-0.5">
+                            <span class="text-[8px] text-slate-400 italic leading-tight">Filters out Gmail, Yahoo, etc.</span>
+                            <label class="flex items-center gap-1 text-[9px] text-slate-500 cursor-pointer select-none">
+                                <input type="checkbox" id="b2bCheck" class="w-3 h-3 rounded border-slate-300 text-brand-600">
+                                B2B Only
+                            </label>
+                        </div>
                     </div>
                     
                     <!-- Text Input Area -->
-                    <textarea id="emailText" class="w-full h-20 px-2.5 py-1.5 text-xs text-slate-700 border border-slate-200 rounded-lg focus:ring-1 focus:ring-brand-400 focus:border-transparent custom-scrollbar resize-none font-mono mb-2" placeholder="paste@emails.here&#10;one@per.line"></textarea>
+                    <textarea id="emailText" class="w-full h-20 px-2.5 py-1.5 text-xs text-slate-700 border border-slate-200 rounded-lg focus:ring-1 focus:ring-brand-400 focus:border-transparent custom-scrollbar resize-none font-mono mb-2" placeholder="paste@emails.here&#10;one@per.line" oninput="updateCreditEstimate()"></textarea>
+                    <div class="flex items-center justify-between mb-1">
+                        <span id="email-count" class="text-[9px] text-slate-400">0 lines</span>
+                        <span id="credit-estimate" class="text-[9px] text-slate-400">0 credits</span>
+                    </div>
 
                     <!-- Actions Row -->
                     <input type="file" id="fileInput" accept=".txt,.csv" class="hidden">
@@ -221,7 +254,7 @@ HTML_TEMPLATE = """
             <div class="lg:w-8/12 flex flex-col gap-2">
                 
                 <!-- Results Dashboard -->
-                <div id="results-panel" class="rounded-lg border border-slate-200 shadow-sm bg-white flex flex-col min-h-[200px]">
+                <div id="results-panel" class="rounded-none border border-slate-200 bg-transparent flex flex-col min-h-[200px]" style="box-sizing: content-box; font-family: Helvetica, Arial, sans-serif; font-weight: 800; box-shadow: none;">
                     
                     <!-- Header -->
                     <div class="flex items-center justify-between px-3 py-2 border-b border-slate-100">
@@ -283,25 +316,55 @@ HTML_TEMPLATE = """
                 <button onclick="closeTopup()" class="text-slate-400 hover:text-slate-600 transition-colors"><i class="fas fa-times"></i></button>
             </div>
             <div class="p-4 space-y-4">
-                <!-- Step 1: Enter Amount -->
+                <!-- Step 1: Choose Credit Bundle -->
                 <div id="topup-step-1">
-                    <label class="text-[11px] font-semibold text-slate-600 block mb-2">Enter amount (USD):</label>
-                    <div class="flex gap-2">
-                        <input id="topup-amount" type="number" min="1" step="1" value="50"
-                               class="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-transparent outline-none"
-                               oninput="updateBtcEstimate()">
-                        <button onclick="generateWallets()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm">
-                            Generate
+                    <label class="text-[11px] font-semibold text-slate-600 block mb-2">Choose a credit bundle:</label>
+                    <div class="grid grid-cols-2 gap-2" id="credit-bundles">
+                        <button onclick="selectBundle(50000, 100)" class="px-3 py-2.5 text-xs border-2 border-slate-200 rounded-lg hover:border-brand-400 hover:bg-brand-50 transition-all text-left font-medium selected-bundle" data-credits="50000" data-usd="100">
+                            <span class="text-slate-800 font-bold">50,000</span>
+                            <span class="text-slate-400"> credits</span>
+                            <br><span class="text-brand-600 font-bold">$100</span>
+                        </button>
+                        <button onclick="selectBundle(100000, 180)" class="px-3 py-2.5 text-xs border-2 border-slate-200 rounded-lg hover:border-brand-400 hover:bg-brand-50 transition-all text-left font-medium" data-credits="100000" data-usd="180">
+                            <span class="text-slate-800 font-bold">100,000</span>
+                            <span class="text-slate-400"> credits</span>
+                            <br><span class="text-brand-600 font-bold">$180</span>
+                        </button>
+                        <button onclick="selectBundle(200000, 266.67)" class="px-3 py-2.5 text-xs border-2 border-slate-200 rounded-lg hover:border-brand-400 hover:bg-brand-50 transition-all text-left font-medium" data-credits="200000" data-usd="266.67">
+                            <span class="text-slate-800 font-bold">200,000</span>
+                            <span class="text-slate-400"> credits</span>
+                            <br><span class="text-brand-600 font-bold">$266.67</span>
+                        </button>
+                        <button onclick="selectBundle(500000, 600)" class="px-3 py-2.5 text-xs border-2 border-slate-200 rounded-lg hover:border-brand-400 hover:bg-brand-50 transition-all text-left font-medium" data-credits="500000" data-usd="600">
+                            <span class="text-slate-800 font-bold">500,000</span>
+                            <span class="text-slate-400"> credits</span>
+                            <br><span class="text-brand-600 font-bold">$600</span>
+                        </button>
+                        <button onclick="selectBundle(1000000, 1000)" class="px-3 py-2.5 text-xs border-2 border-slate-200 rounded-lg hover:border-brand-400 hover:bg-brand-50 transition-all text-left font-medium" data-credits="1000000" data-usd="1000">
+                            <span class="text-slate-800 font-bold">1,000,000</span>
+                            <span class="text-slate-400"> credits</span>
+                            <br><span class="text-brand-600 font-bold">$1,000</span>
+                        </button>
+                        <button onclick="selectBundle(2000000, 1733.33)" class="px-3 py-2.5 text-xs border-2 border-slate-200 rounded-lg hover:border-brand-400 hover:bg-brand-50 transition-all text-left font-medium" data-credits="2000000" data-usd="1733.33">
+                            <span class="text-slate-800 font-bold">2,000,000</span>
+                            <span class="text-slate-400"> credits</span>
+                            <br><span class="text-brand-600 font-bold">$1,733.33</span>
                         </button>
                     </div>
-                    <p class="text-[9px] text-slate-400 mt-1">≈ <span id="btc-estimate">0.0000</span> BTC</p>
+                    <div class="flex items-center gap-2 mt-3">
+                        <span class="text-[11px] text-slate-500">Selected: <span id="selected-bundle-label" class="font-bold text-brand-600">50,000 credits ($100)</span></span>
+                        <span class="text-[9px] text-slate-400">≈ <span id="btc-estimate">0.0000</span> BTC</span>
+                    </div>
+                    <button onclick="generateWallets()" class="mt-3 w-full py-2 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm">
+                        Generate Payment Address
+                    </button>
                 </div>
 
                 <!-- Step 2: Wallet Addresses -->
                 <div id="topup-step-2" class="hidden">
                     <div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-3">
                         <p class="text-[10px] font-bold text-red-700 text-center">
-                            SEND <span id="topup-amount-display">0.00078640</span> BTC or ($<span id="topup-amount-usd">50</span>) TO ANY WALLET BELOW:
+                            SEND <span id="topup-amount-display">0.00078640</span> BTC ($<span id="topup-amount-usd">100</span>) = <span id="topup-credits-display">50,000</span> CREDITS TO ANY WALLET BELOW:
                         </p>
                     </div>
                     <div class="space-y-2">
@@ -405,28 +468,26 @@ HTML_TEMPLATE = """
         // ── Balance / Top-up Functions ──
 
         let topupReqId = null;
-        let btcPrice = 0;
+        let selectedCredits = 50000;
+        let selectedUsd = 100;
+        let btcPrice = null;
 
-        async function loadBalance() {
-            try {
-                const res = await fetch(`/api/balance?uid=${encodeURIComponent(window.USER_ID)}`);
-                const data = await res.json();
-                document.getElementById('balance-amount').textContent = data.balance.toFixed(2);
-            } catch (e) { /* ignore */ }
-        }
-
-        function openTopup() {
-            document.getElementById('topup-modal').classList.remove('hidden');
-            document.getElementById('topup-step-1').classList.remove('hidden');
-            document.getElementById('topup-step-2').classList.add('hidden');
-            document.getElementById('paid-status').classList.add('hidden');
-            document.getElementById('topup-amount').value = 50;
-            topupReqId = null;
+        // ── Top-Up ──
+        function selectBundle(credits, usd) {
+            selectedCredits = credits;
+            selectedUsd = usd;
+            document.querySelectorAll('#credit-bundles button').forEach(b => {
+                b.classList.remove('selected-bundle', 'border-brand-500', 'bg-brand-50');
+                b.classList.add('border-slate-200');
+            });
+            const btn = document.querySelector(`button[data-credits="${credits}"]`);
+            if (btn) {
+                btn.classList.add('selected-bundle', 'border-brand-500', 'bg-brand-50');
+                btn.classList.remove('border-slate-200');
+            }
+            document.getElementById('selected-bundle-label').textContent =
+                credits.toLocaleString() + ' credits ($' + usd + ')';
             updateBtcEstimate();
-        }
-
-        function closeTopup() {
-            document.getElementById('topup-modal').classList.add('hidden');
         }
 
         async function updateBtcEstimate() {
@@ -437,13 +498,13 @@ HTML_TEMPLATE = """
                     btcPrice = d.btc_price || 0;
                 } catch (e) { return; }
             }
-            const usd = parseFloat(document.getElementById('topup-amount').value) || 0;
-            const btc = btcPrice > 0 ? (usd / btcPrice) : 0;
+            const btc = btcPrice > 0 ? (selectedUsd / btcPrice) : 0;
             document.getElementById('btc-estimate').textContent = btc.toFixed(8);
         }
 
         async function generateWallets() {
-            const amount = parseFloat(document.getElementById('topup-amount').value) || 0;
+            const amount = selectedUsd;
+            const credits = selectedCredits;
             if (amount < 1) { alert('Minimum $1'); return; }
 
             try {
@@ -465,15 +526,38 @@ HTML_TEMPLATE = """
                 const pdata = await pres.json();
                 topupReqId = pdata.id;
 
-                // Show step 2 with BTC + USD amounts
+                // Show step 2 with BTC + USD + credits
                 const btcAmt = (wallets.btc_price > 0) ? (amount / wallets.btc_price) : 0;
                 document.getElementById('topup-amount-display').textContent = btcAmt.toFixed(8);
                 document.getElementById('topup-amount-usd').textContent = amount;
+                document.getElementById('topup-credits-display').textContent = credits.toLocaleString();
                 document.getElementById('topup-step-1').classList.add('hidden');
                 document.getElementById('topup-step-2').classList.remove('hidden');
             } catch (e) {
                 alert('Failed to generate. Try again.');
             }
+        }
+
+        async function loadBalance() {
+            try {
+                const res = await fetch(`/api/balance?uid=${encodeURIComponent(window.USER_ID)}`);
+                const data = await res.json();
+                document.getElementById('balance-amount').textContent = Math.floor(data.balance).toLocaleString();
+            } catch (e) { /* ignore */ }
+        }
+
+        function openTopup() {
+            document.getElementById('topup-modal').classList.remove('hidden');
+            document.getElementById('topup-step-1').classList.remove('hidden');
+            document.getElementById('topup-step-2').classList.add('hidden');
+            document.getElementById('paid-status').classList.add('hidden');
+            topupReqId = null;
+            // Reset to default bundle (50,000 credits)
+            selectBundle(50000, 100);
+        }
+
+        function closeTopup() {
+            document.getElementById('topup-modal').classList.add('hidden');
         }
 
         async function copyWallet(name) {
@@ -556,6 +640,13 @@ HTML_TEMPLATE = """
         }
 
         // --- Input Handling ---
+        function updateCreditEstimate() {
+            const text = emailText.value.trim();
+            const lines = text ? text.split('\\n').filter(l => l.trim()).length : 0;
+            document.getElementById('email-count').textContent = lines.toLocaleString() + ' lines';
+            document.getElementById('credit-estimate').textContent = (lines * 1).toLocaleString() + ' credits';
+        }
+
         // Ensure Cmd/Ctrl+A selects all text in textarea
         emailText.addEventListener('keydown', (e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
@@ -574,6 +665,13 @@ HTML_TEMPLATE = """
                 emailText.disabled = true;
                 emailText.classList.add('bg-slate-50', 'text-slate-400');
                 emailText.placeholder = `File selected: ${selectedFile.name}`;
+                
+                // Show file credit estimate
+                selectedFile.text().then(text => {
+                    const lines = text.split('\\n').filter(l => l.trim()).length;
+                    document.getElementById('email-count').textContent = lines.toLocaleString() + ' lines';
+                    document.getElementById('credit-estimate').textContent = (lines * 1).toLocaleString() + ' credits';
+                });
             }
         });
         
@@ -635,6 +733,10 @@ HTML_TEMPLATE = """
             copyBtn.classList.add('opacity-50', 'cursor-not-allowed');
             
             consoleOutput.innerHTML = '<div class="text-slate-600 italic text-center mt-10">Results will appear here...</div>';
+            
+            // Reset credit estimate
+            document.getElementById('email-count').textContent = '0 lines';
+            document.getElementById('credit-estimate').textContent = '0 credits';
         }
 
         async function startValidation() {
@@ -643,6 +745,21 @@ HTML_TEMPLATE = """
             if (!selectedFile && !textContent) {
                 alert("Please paste emails or upload a file first.");
                 return;
+            }
+
+            // Check email count against bulk limit (rough client-side estimate)
+            let estimatedCount = 0;
+            if (selectedFile) {
+                const text = await selectedFile.text();
+                estimatedCount = text.split('\\n').filter(l => l.trim()).length;
+            } else {
+                estimatedCount = textContent.split('\\n').filter(l => l.trim()).length;
+            }
+            if (estimatedCount > window.BULK_MAX_EMAILS) {
+                if (!confirm("You have ~" + estimatedCount.toLocaleString() + " emails, which exceeds the " + window.BULK_MAX_EMAILS.toLocaleString() + " bulk limit.\\n\\nOnly the first " + window.BULK_MAX_EMAILS.toLocaleString() + " will be processed. Continue?")) {
+                    finishValidation();
+                    return;
+                }
             }
 
             // Lock UI
@@ -683,7 +800,19 @@ HTML_TEMPLATE = """
 
                 const data = await response.json();
                 if (!response.ok) {
-                    consoleOutput.innerHTML += `<div class="text-red-500 p-2">Request Error: ${data.error || response.status}</div>`;
+                    // Handle insufficient credits (402)
+                    if (response.status === 402 && data.needed) {
+                        const shortfall = data.shortfall || 0;
+                        const bundle = data.cheapest_bundle || 50000;
+                        const price = data.cheapest_price || 100;
+                        consoleOutput.innerHTML +=
+                            `<div class="text-red-500 p-2 font-semibold">Insufficient Credits</div>` +
+                            `<div class="text-red-400 p-1 text-[10px]">You need ${data.needed.toLocaleString()} credits but have ${data.balance.toLocaleString()}.</div>` +
+                            `<div class="text-red-400 p-1 text-[10x]">Shortfall: ${shortfall.toLocaleString()} credits</div>` +
+                            `<div class="mt-2 p-2"><button onclick="openTopup()" class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white text-[10px] font-semibold rounded-lg transition-colors">Top Up Now — Buy ${bundle.toLocaleString()} credits for $${price}</button></div>`;
+                    } else {
+                        consoleOutput.innerHTML += `<div class="text-red-500 p-2">Request Error: ${data.error || response.status}</div>`;
+                    }
                     finishValidation();
                     return;
                 }
@@ -876,6 +1005,8 @@ HTML_TEMPLATE = """
                     document.body.removeChild(a);
                 };
             }
+            // Refresh balance after validation completes
+            loadBalance();
         }
     </script>
 </body>
@@ -1218,7 +1349,12 @@ def api_admin_payment():
     if admin_secret and secret != admin_secret:
         return "Invalid secret", 403
     if action == "approve":
-        approve_payment(req_id, "Admin approved")
+        req = get_payment_request(req_id)
+        if req:
+            credit_amount = usd_to_credits(float(req["amount_usd"]))
+            approve_payment(req_id, "Admin approved", credits=credit_amount)
+        else:
+            approve_payment(req_id, "Admin approved")
         return "✅ Payment approved. User credited."
     elif action == "deny":
         deny_payment(req_id, "Admin denied")
@@ -1426,6 +1562,20 @@ def validate():
     if len(submit_emails) > BULK_MAX_EMAILS:
         return jsonify({"error": f"Too many emails (max {BULK_MAX_EMAILS})"}), 400
 
+    # ── Credit check & deduction ──
+    total_cost = len(submit_emails) * CREDITS_PER_EMAIL
+    if not deduct_credits(uid_int, total_cost):
+        bal = get_balance(uid_int)
+        cheapest = CREDIT_TIERS[0]
+        return jsonify({
+            "error": "Insufficient credits",
+            "needed": total_cost,
+            "balance": bal,
+            "shortfall": total_cost - bal,
+            "cheapest_bundle": cheapest[0],
+            "cheapest_price": cheapest[1],
+        }), 402
+
     payload_text = "\n".join(submit_emails) + "\n"
     payload_bytes = payload_text.encode("utf-8")
     if len(payload_bytes) > BULK_MAX_FILE_BYTES:
@@ -1448,6 +1598,8 @@ def validate():
                 "invalid_total": invalid_total,
             }), 202
 
+        # Refund credits since the job wasn't actually submitted
+        add_credits(uid_int, total_cost)
         get_file(token)  # verify it exists, will be cleaned up by TTL
         return jsonify({"error": err}), 400
 

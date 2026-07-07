@@ -234,6 +234,23 @@ def add_credits(user_id: int, amount: float):
         conn.commit()
 
 
+def deduct_credits(user_id: int, amount: float) -> bool:
+    """Deduct credits from a user's balance if sufficient. Returns True on success."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT credits FROM balances WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+            balance = float(row["credits"]) if row else 0.0
+            if balance < amount:
+                return False
+            cur.execute(
+                "UPDATE balances SET credits = credits - %s, updated_at = now() WHERE user_id = %s",
+                (amount, user_id),
+            )
+        conn.commit()
+    return True
+
+
 def create_payment_request(user_id: int, uid_str: str, amount_usd: float, tx_hash: str = "") -> dict:
     """Create a pending payment request for admin approval."""
     with get_conn() as conn:
@@ -257,12 +274,13 @@ def get_payment_request(req_id: int) -> dict | None:
             return dict(row) if row else None
 
 
-def approve_payment(req_id: int, admin_note: str = ""):
+def approve_payment(req_id: int, admin_note: str = "", credits: float | None = None):
     """Approve a payment request and add credits."""
     req = get_payment_request(req_id)
     if not req or req["status"] != "pending":
         return False
-    add_credits(req["user_id"], float(req["amount_usd"]))
+    credit_amount = credits if credits is not None else float(req["amount_usd"])
+    add_credits(req["user_id"], credit_amount)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -270,7 +288,7 @@ def approve_payment(req_id: int, admin_note: str = ""):
                 (admin_note, req_id),
             )
         conn.commit()
-    logger.info("Approved payment req_id=%d user_id=%d amount=%s", req_id, req["user_id"], req["amount_usd"])
+    logger.info("Approved payment req_id=%d user_id=%d amount=%s credits=%.0f", req_id, req["user_id"], req["amount_usd"], credit_amount)
     return True
 
 
