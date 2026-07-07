@@ -1,2 +1,5 @@
 requests
 flask
+gunicorn
+gevent
+psycopg2-binary
