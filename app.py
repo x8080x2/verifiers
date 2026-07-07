@@ -1138,13 +1138,14 @@ def api_topup():
         return jsonify({"error": "Minimum amount is $1"}), 400
     uid_int = (abs(hash(uid_str)) % (2**31 - 1)) or 1
     req = create_payment_request(uid_int, uid_str, amount)
+    admin_secret_url = os.getenv("ADMIN_SECRET", "ADMIN_SECRET")
     _notify_admin(
         f"💰 <b>New Payment Request</b>\n"
         f"User: {uid_str}\n"
         f"Amount: ${amount:.2f}\n"
         f"Request ID: {req['id']}\n"
-        f"Approve: https://{request.host}/api/admin/payment?id={req['id']}&action=approve&secret=ADMIN_SECRET\n"
-        f"Deny: https://{request.host}/api/admin/payment?id={req['id']}&action=deny&secret=ADMIN_SECRET"
+        f"Approve: https://{request.host}/api/admin/payment?id={req['id']}&action=approve&secret={admin_secret_url}\n"
+        f"Deny: https://{request.host}/api/admin/payment?id={req['id']}&action=deny&secret={admin_secret_url}"
     )
     return jsonify({"id": req["id"], "amount": amount, "status": "pending"})
 
