@@ -207,17 +207,14 @@ HTML_TEMPLATE = """
     <!-- Main Content -->
     <main class="flex-grow container mx-auto max-w-6xl py-3">
         
-        <div class="flex gap-3 px-4">
+        <div class="px-4">
             
-            <!-- LEFT COLUMN: INPUT -->
-            <div class="lg:w-4/12 flex flex-col gap-2">
+            <!-- Merged Panel: Input + Results (side by side) -->
+            <div class="rounded-none border border-slate-200 bg-transparent flex overflow-hidden" style="box-sizing: content-box; font-family: Helvetica, Arial, sans-serif; font-weight: 800; box-shadow: none;">
                 
-                <!-- Input Panel -->
-                <div class="rounded-none p-3 flex flex-col bg-transparent border border-slate-200" id="inputZone" style="box-sizing: content-box; font-family: Helvetica, Arial, sans-serif; font-weight: 800; line-height: normal; box-shadow: none;">
+                <!-- ── Input Section (left) ── -->
+                <div class="w-4/12 p-3 border-r border-slate-100" id="inputZone">
                     <div class="flex items-center justify-between mb-2">
-                        <h3 class="text-[11px] font-semibold text-slate-700">
-                            <i class="fas fa-pen-to-square text-brand-600 mr-1.5"></i>Input Emails
-                        </h3>
                         <div class="flex flex-col items-end gap-0.5">
                             <span class="text-[8px] text-slate-400 italic leading-tight">Filters out Gmail, Yahoo, etc.</span>
                             <label class="flex items-center gap-1 text-[9px] text-slate-500 cursor-pointer select-none">
@@ -248,16 +245,12 @@ HTML_TEMPLATE = """
                         <span id="fileNameLabel" class="truncate inline-block max-w-full">Select .txt or .csv file</span>
                     </div>
                 </div>
-            </div>
 
-            <!-- RIGHT COLUMN: RESULTS -->
-            <div class="lg:w-8/12 flex flex-col gap-2">
-                
-                <!-- Results Dashboard -->
-                <div id="results-panel" class="rounded-none border border-slate-200 bg-transparent flex flex-col min-h-[200px]" style="box-sizing: content-box; font-family: Helvetica, Arial, sans-serif; font-weight: 800; box-shadow: none;">
+                <!-- ── Results Section (right) ── -->
+                <div id="results-panel" class="w-8/12 flex flex-col">
                     
                     <!-- Header -->
-                    <div class="flex items-center justify-between px-3 py-2 border-b border-slate-100">
+                    <div class="flex items-center justify-between px-3 py-2">
                         <div class="flex items-center gap-2">
                             <div class="relative w-8 h-8 flex items-center justify-center">
                                 <svg class="transform -rotate-90 w-10 h-10 flex-shrink-0">
@@ -283,7 +276,7 @@ HTML_TEMPLATE = """
 
                     <!-- Log -->
                     <div class="flex-1 flex flex-col min-h-[140px]">
-                        <div class="flex items-center justify-between px-3 pt-1.5 pb-0.5">
+                        <div class="flex items-center justify-between px-3 pt-0 pb-0.5">
                             <h4 class="text-[9px] font-semibold text-slate-500 flex items-center gap-1.5">
                                 <i class="fas fa-list-ul"></i> Activity Log
                                 <span class="flex h-1.5 w-1.5" id="live-indicator" style="opacity: 0;">
