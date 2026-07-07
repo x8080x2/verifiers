@@ -13,7 +13,9 @@ import zipfile
 from db import (init_schema, store_file, get_file, create_job, get_job,
                 update_job_progress, complete_job, fail_job, cleanup_old_jobs,
                 count_active_jobs_for_user, count_all_active_jobs,
-                get_oldest_queued_job, queue_job, get_conn)
+                get_oldest_queued_job, queue_job, get_conn,
+                get_balance, add_credits, create_payment_request,
+                get_payment_request, approve_payment, deny_payment)
 
 # --- Configuration ---
 def load_dotenv_file(dotenv_path):
@@ -51,6 +53,15 @@ BULK_MAX_FILE_BYTES = int(os.getenv("BULK_MAX_FILE_BYTES", str(20 * 1024 * 1024)
 BULK_FILE_TTL_S = int(os.getenv("BULK_FILE_TTL_S", "86400"))
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+
+# Wallet addresses for top-up
+BTC_WALLET = os.getenv("BTC_WALLET", "")
+USDT_TRC20_WALLET = os.getenv("USDT_TRC20_WALLET", "")
+USDT_ERC20_WALLET = os.getenv("USDT_ERC20_WALLET", "")
+
+# Telegram admin bot
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-']+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
 
@@ -141,6 +152,10 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
+                    <div id="balance-display" class="hidden md:flex items-center gap-1.5 px-2 py-0.5 bg-amber-50 text-amber-800 rounded-full text-[9px] font-semibold border border-amber-200 cursor-pointer hover:bg-amber-100 transition-colors" onclick="openTopup()">
+                        <i class="fas fa-coins text-[9px]"></i>
+                        <span>$<span id="balance-amount">0.00</span></span>
+                    </div>
                     <div id="status-badge" class="hidden md:flex items-center gap-1.5 px-2 py-0.5 bg-slate-100 text-slate-500 rounded-full text-[9px] font-semibold border border-slate-200">
                         <span class="w-1.5 h-1.5 bg-slate-400 rounded-full"></span>
                         Checking API...
@@ -259,6 +274,84 @@ HTML_TEMPLATE = """
         </div>
     </main>
 
+    <!-- Top-Up Modal -->
+    <div id="topup-modal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-xl shadow-2xl max-w-lg w-full mx-4 overflow-hidden border border-slate-200">
+            <!-- Header -->
+            <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+                <h3 class="text-sm font-bold text-slate-800"><i class="fas fa-coins text-amber-500 mr-2"></i>Top Up Balance</h3>
+                <button onclick="closeTopup()" class="text-slate-400 hover:text-slate-600 transition-colors"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="p-4 space-y-4">
+                <!-- Step 1: Enter Amount -->
+                <div id="topup-step-1">
+                    <label class="text-[11px] font-semibold text-slate-600 block mb-2">Enter amount (USD):</label>
+                    <div class="flex gap-2">
+                        <input id="topup-amount" type="number" min="1" step="1" value="50"
+                               class="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-transparent outline-none"
+                               oninput="updateBtcEstimate()">
+                        <button onclick="generateWallets()" class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm">
+                            Generate
+                        </button>
+                    </div>
+                    <p class="text-[9px] text-slate-400 mt-1">≈ <span id="btc-estimate">0.0000</span> BTC</p>
+                </div>
+
+                <!-- Step 2: Wallet Addresses -->
+                <div id="topup-step-2" class="hidden">
+                    <div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-3">
+                        <p class="text-[10px] font-bold text-red-700 text-center">
+                            SEND $<span id="topup-amount-display">50</span> TO ANY WALLET BELOW:
+                        </p>
+                    </div>
+                    <div class="space-y-2">
+                        <div class="bg-slate-50 rounded-lg p-2.5 border border-slate-200">
+                            <p class="text-[9px] font-semibold text-slate-500 mb-1">BTC:</p>
+                            <div class="flex gap-1">
+                                <input id="wallet-btc" readonly
+                                       class="flex-1 px-2 py-1 text-[10px] font-mono bg-white border border-slate-200 rounded text-slate-700 truncate outline-none"
+                                       onclick="this.select()">
+                                <button onclick="copyWallet('btc')" class="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-600 text-[9px] rounded transition-colors"><i class="fas fa-copy"></i></button>
+                            </div>
+                        </div>
+                        <div class="bg-slate-50 rounded-lg p-2.5 border border-slate-200">
+                            <p class="text-[9px] font-semibold text-slate-500 mb-1">USDT TRC20:</p>
+                            <div class="flex gap-1">
+                                <input id="wallet-usdt-trc20" readonly
+                                       class="flex-1 px-2 py-1 text-[10px] font-mono bg-white border border-slate-200 rounded text-slate-700 truncate outline-none"
+                                       onclick="this.select()">
+                                <button onclick="copyWallet('usdt_trc20')" class="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-600 text-[9px] rounded transition-colors"><i class="fas fa-copy"></i></button>
+                            </div>
+                        </div>
+                        <div class="bg-slate-50 rounded-lg p-2.5 border border-slate-200">
+                            <p class="text-[9px] font-semibold text-slate-500 mb-1">USDT ERC20:</p>
+                            <div class="flex gap-1">
+                                <input id="wallet-usdt-erc20" readonly
+                                       class="flex-1 px-2 py-1 text-[10px] font-mono bg-white border border-slate-200 rounded text-slate-700 truncate outline-none"
+                                       onclick="this.select()">
+                                <button onclick="copyWallet('usdt_erc20')" class="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-600 text-[9px] rounded transition-colors"><i class="fas fa-copy"></i></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Auto-update + No refund notice -->
+                    <div class="bg-green-50 border border-green-200 rounded-lg p-2 mt-3">
+                        <p class="text-[9px] font-semibold text-green-700 text-center">✅ BALANCE WILL BE AUTO-UPDATED IF PAYMENT CONFIRMED</p>
+                    </div>
+                    <div class="bg-red-50 border border-red-200 rounded-lg p-2 mt-1">
+                        <p class="text-[9px] font-bold text-red-600 text-center">‼️ NO REFUND POLICY</p>
+                    </div>
+
+                    <!-- I've Paid button -->
+                    <button id="paid-btn" onclick="notifyPaid()" class="w-full py-2.5 mt-3 bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded-lg transition-all shadow-sm flex items-center justify-center gap-2">
+                        <i class="fas fa-check-circle"></i> I'VE PAID
+                    </button>
+                    <p id="paid-status" class="text-[9px] text-slate-400 text-center mt-1 hidden">Notification sent. Admin will verify your payment.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <footer class="mt-auto py-3 border-t border-slate-200 bg-white">
         <div class="container mx-auto px-4 text-center text-slate-400 text-[9px]">
             <p>&copy; 2026 ClosedVerifier.</p>
@@ -299,7 +392,110 @@ HTML_TEMPLATE = """
         // --- Initialization ---
         window.addEventListener('load', () => {
             checkApiStatus();
+            loadBalance();
         });
+
+        // ── Balance / Top-up Functions ──
+
+        let topupReqId = null;
+        let btcPrice = 0;
+
+        async function loadBalance() {
+            try {
+                const res = await fetch(`/api/balance?uid=${encodeURIComponent(window.USER_ID)}`);
+                const data = await res.json();
+                document.getElementById('balance-amount').textContent = data.balance.toFixed(2);
+            } catch (e) { /* ignore */ }
+        }
+
+        function openTopup() {
+            document.getElementById('topup-modal').classList.remove('hidden');
+            document.getElementById('topup-step-1').classList.remove('hidden');
+            document.getElementById('topup-step-2').classList.add('hidden');
+            document.getElementById('paid-status').classList.add('hidden');
+            document.getElementById('topup-amount').value = 50;
+            topupReqId = null;
+            updateBtcEstimate();
+        }
+
+        function closeTopup() {
+            document.getElementById('topup-modal').classList.add('hidden');
+        }
+
+        async function updateBtcEstimate() {
+            if (!btcPrice) {
+                try {
+                    const r = await fetch('/api/wallets');
+                    const d = await r.json();
+                    btcPrice = d.btc_price || 0;
+                } catch (e) { return; }
+            }
+            const usd = parseFloat(document.getElementById('topup-amount').value) || 0;
+            const btc = btcPrice > 0 ? (usd / btcPrice) : 0;
+            document.getElementById('btc-estimate').textContent = btc.toFixed(8);
+        }
+
+        async function generateWallets() {
+            const amount = parseFloat(document.getElementById('topup-amount').value) || 0;
+            if (amount < 1) { alert('Minimum $1'); return; }
+
+            try {
+                // Fetch wallets
+                const wres = await fetch('/api/wallets');
+                const wallets = await wres.json();
+                btcPrice = wallets.btc_price || 0;
+
+                document.getElementById('wallet-btc').value = wallets.btc || 'Not configured';
+                document.getElementById('wallet-usdt-trc20').value = wallets.usdt_trc20 || 'Not configured';
+                document.getElementById('wallet-usdt-erc20').value = wallets.usdt_erc20 || 'Not configured';
+
+                // Create payment request
+                const pres = await fetch('/api/topup', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({amount, uid: window.USER_ID}),
+                });
+                const pdata = await pres.json();
+                topupReqId = pdata.id;
+
+                // Show step 2
+                document.getElementById('topup-amount-display').textContent = amount;
+                document.getElementById('topup-step-1').classList.add('hidden');
+                document.getElementById('topup-step-2').classList.remove('hidden');
+            } catch (e) {
+                alert('Failed to generate. Try again.');
+            }
+        }
+
+        async function copyWallet(name) {
+            const input = document.getElementById(`wallet-${name}`);
+            if (input && input.value) {
+                try {
+                    await navigator.clipboard.writeText(input.value);
+                } catch (e) {
+                    input.select();
+                    document.execCommand('copy');
+                }
+            }
+        }
+
+        async function notifyPaid() {
+            if (!topupReqId) return;
+            document.getElementById('paid-btn').disabled = true;
+            document.getElementById('paid-btn').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
+            try {
+                await fetch('/api/topup/notify', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: topupReqId, uid: window.USER_ID}),
+                });
+                document.getElementById('paid-status').classList.remove('hidden');
+                document.getElementById('paid-btn').innerHTML = '<i class="fas fa-check-circle"></i> NOTIFIED ✓';
+            } catch (e) {
+                document.getElementById('paid-btn').disabled = false;
+                document.getElementById('paid-btn').innerHTML = '<i class="fas fa-check-circle"></i> I\\'VE PAID';
+            }
+        }
 
         async function checkApiStatus() {
             try {
@@ -883,6 +1079,111 @@ def health():
             "bulk_ready": bulk_ready,
         }
     )
+
+
+# ── Balance / Top-up API ──
+
+def _fetch_btc_price():
+    """Get live BTC price in USD."""
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+                         timeout=(3, 5))
+        return r.json().get("bitcoin", {}).get("usd", 0)
+    except Exception:
+        return 0
+
+
+def _notify_admin(message: str):
+    """Send a Telegram notification to the admin."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_ADMIN_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_ADMIN_CHAT_ID, "text": message, "parse_mode": "HTML"},
+            timeout=(3, 5),
+        )
+    except Exception:
+        logger.exception("Failed to send Telegram notification")
+
+
+@app.route("/api/wallets")
+def api_wallets():
+    """Return wallet addresses and live BTC price."""
+    btc_price = _fetch_btc_price()
+    return jsonify({
+        "btc_price": btc_price,
+        "btc": BTC_WALLET,
+        "usdt_trc20": USDT_TRC20_WALLET,
+        "usdt_erc20": USDT_ERC20_WALLET,
+    })
+
+
+@app.route("/api/balance")
+def api_balance():
+    """Get user balance by uid."""
+    uid_str = request.args.get("uid", "anonymous").strip()
+    uid_int = (abs(hash(uid_str)) % (2**31 - 1)) or 1
+    bal = get_balance(uid_int)
+    return jsonify({"balance": bal, "uid": uid_str})
+
+
+@app.route("/api/topup", methods=["POST"])
+def api_topup():
+    """Create a payment request."""
+    data = request.get_json(silent=True) or {}
+    amount = float(data.get("amount", 0))
+    uid_str = str(data.get("uid", "anonymous")).strip()
+    if amount < 1:
+        return jsonify({"error": "Minimum amount is $1"}), 400
+    uid_int = (abs(hash(uid_str)) % (2**31 - 1)) or 1
+    req = create_payment_request(uid_int, uid_str, amount)
+    _notify_admin(
+        f"💰 <b>New Payment Request</b>\n"
+        f"User: {uid_str}\n"
+        f"Amount: ${amount:.2f}\n"
+        f"Request ID: {req['id']}\n"
+        f"Approve: https://{request.host}/api/admin/payment?id={req['id']}&action=approve&secret=ADMIN_SECRET\n"
+        f"Deny: https://{request.host}/api/admin/payment?id={req['id']}&action=deny&secret=ADMIN_SECRET"
+    )
+    return jsonify({"id": req["id"], "amount": amount, "status": "pending"})
+
+
+@app.route("/api/topup/notify", methods=["POST"])
+def api_topup_notify():
+    """User clicked 'I've Paid' — notify admin."""
+    data = request.get_json(silent=True) or {}
+    req_id = int(data.get("id", 0))
+    uid_str = str(data.get("uid", "anonymous")).strip()
+    req = get_payment_request(req_id)
+    if not req:
+        return jsonify({"error": "Payment request not found"}), 404
+    _notify_admin(
+        f"✅ <b>User Clicked 'I\\'ve Paid'</b>\n"
+        f"User: {uid_str}\n"
+        f"Amount: ${float(req['amount_usd']):.2f}\n"
+        f"Request ID: {req_id}\n"
+        f"Check your wallets and confirm."
+    )
+    return jsonify({"status": "notified"})
+
+
+@app.route("/api/admin/payment")
+def api_admin_payment():
+    """Admin approves or denies a payment (via Telegram link)."""
+    req_id = int(request.args.get("id", 0))
+    action = request.args.get("action", "")
+    secret = request.args.get("secret", "")
+    admin_secret = os.getenv("ADMIN_SECRET", "")
+    if admin_secret and secret != admin_secret:
+        return "Invalid secret", 403
+    if action == "approve":
+        approve_payment(req_id, "Admin approved")
+        return "✅ Payment approved. User credited."
+    elif action == "deny":
+        deny_payment(req_id, "Admin denied")
+        return "❌ Payment denied."
+    return "Invalid action", 400
 
 
 @app.route("/bulk/file/<token>")

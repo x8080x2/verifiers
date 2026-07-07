@@ -207,3 +207,80 @@ def queue_job(list_id: str, submitted_total: int, filtered_total: int,
         conn.commit()
     logger.info("Queued job list_id=%s total=%d", list_id, submitted_total)
     return dict(row)
+
+
+# ── Balance / Top-up helpers ──
+
+def get_balance(user_id: int) -> float:
+    """Get user's current credit balance."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT credits FROM balances WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+            return float(row["credits"]) if row else 0.0
+
+
+def add_credits(user_id: int, amount: float):
+    """Add credits to a user's balance."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO balances (user_id, credits, updated_at)
+                   VALUES (%s, %s, now())
+                   ON CONFLICT (user_id)
+                   DO UPDATE SET credits = balances.credits + %s, updated_at = now()""",
+                (user_id, amount, amount),
+            )
+        conn.commit()
+
+
+def create_payment_request(user_id: int, uid_str: str, amount_usd: float) -> dict:
+    """Create a pending payment request for admin approval."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO payment_requests (user_id, uid_str, amount_usd, status)
+                   VALUES (%s, %s, %s, 'pending') RETURNING *""",
+                (user_id, uid_str, amount_usd),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return dict(row)
+
+
+def get_payment_request(req_id: int) -> dict | None:
+    """Get a payment request by ID."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM payment_requests WHERE id = %s", (req_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def approve_payment(req_id: int, admin_note: str = ""):
+    """Approve a payment request and add credits."""
+    req = get_payment_request(req_id)
+    if not req or req["status"] != "pending":
+        return False
+    add_credits(req["user_id"], float(req["amount_usd"]))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE payment_requests SET status = 'approved', admin_note = %s, updated_at = now() WHERE id = %s",
+                (admin_note, req_id),
+            )
+        conn.commit()
+    logger.info("Approved payment req_id=%d user_id=%d amount=%s", req_id, req["user_id"], req["amount_usd"])
+    return True
+
+
+def deny_payment(req_id: int, admin_note: str = ""):
+    """Deny a payment request without adding credits."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE payment_requests SET status = 'denied', admin_note = %s, updated_at = now() WHERE id = %s",
+                (admin_note, req_id),
+            )
+        conn.commit()
+    logger.info("Denied payment req_id=%d", req_id)
