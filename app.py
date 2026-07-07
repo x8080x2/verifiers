@@ -34,7 +34,7 @@ def load_dotenv_file(dotenv_path):
 
 load_dotenv_file(os.path.join(os.path.dirname(__file__), ".env"))
 
-APP_NAME = "ClosedEmailDeBounce"
+APP_NAME = "ClosedVerifier"
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 START_TIME = time.time()
 
@@ -133,7 +133,7 @@ HTML_TEMPLATE = """
                         <i class="fas fa-shield-alt text-xs"></i>
                     </div>
                     <div>
-                        <h1 class="text-xs font-bold text-slate-900 tracking-tight leading-none">ClosedEmailDeBounce</h1>
+                        <h1 class="text-xs font-bold text-slate-900 tracking-tight leading-none">ClosedVerifier</h1>
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
@@ -257,7 +257,7 @@ HTML_TEMPLATE = """
 
     <footer class="mt-auto py-3 border-t border-slate-200 bg-white">
         <div class="container mx-auto px-4 text-center text-slate-400 text-[9px]">
-            <p>&copy; 2026 ClosedEmailDeBounce.</p>
+            <p>&copy; 2026 ClosedVerifier.</p>
         </div>
     </footer>
 
