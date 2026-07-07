@@ -331,6 +331,14 @@ HTML_TEMPLATE = """
         }
 
         // --- Input Handling ---
+        // Ensure Cmd/Ctrl+A selects all text in textarea
+        emailText.addEventListener('keydown', (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+                e.target.select();
+                e.preventDefault();
+            }
+        });
+
         fileInput.addEventListener('change', (e) => {
             if (e.target.files.length) {
                 selectedFile = e.target.files[0];
