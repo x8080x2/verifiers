@@ -810,7 +810,6 @@ def index():
 @app.after_request
 def add_security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
     resp.headers.setdefault("Cache-Control", "no-store")
     return resp
