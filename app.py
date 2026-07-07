@@ -152,7 +152,7 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 <div class="flex items-center gap-3">
-                    <div id="balance-display" class="hidden md:flex items-center gap-1.5 px-2 py-0.5 bg-amber-50 text-amber-800 rounded-full text-[9px] font-semibold border border-amber-200 cursor-pointer hover:bg-amber-100 transition-colors" onclick="openTopup()">
+                    <div id="balance-display" class="flex items-center gap-1.5 px-2 py-0.5 bg-amber-50 text-amber-800 rounded-full text-[9px] font-semibold border border-amber-200 cursor-pointer hover:bg-amber-100 transition-colors" onclick="openTopup()">
                         <i class="fas fa-coins text-[9px]"></i>
                         <span>$<span id="balance-amount">0.00</span></span>
                     </div>
@@ -301,7 +301,7 @@ HTML_TEMPLATE = """
                 <div id="topup-step-2" class="hidden">
                     <div class="bg-red-50 border border-red-200 rounded-lg p-3 mb-3">
                         <p class="text-[10px] font-bold text-red-700 text-center">
-                            SEND $<span id="topup-amount-display">50</span> TO ANY WALLET BELOW:
+                            SEND <span id="topup-amount-display">0.00078640</span> BTC or ($<span id="topup-amount-usd">50</span>) TO ANY WALLET BELOW:
                         </p>
                     </div>
                     <div class="space-y-2">
@@ -342,11 +342,18 @@ HTML_TEMPLATE = """
                         <p class="text-[9px] font-bold text-red-600 text-center">‼️ NO REFUND POLICY</p>
                     </div>
 
+                    <!-- Transaction Hash Input -->
+                    <div class="mt-3">
+                        <label class="text-[11px] font-semibold text-slate-600 block mb-1">Transaction Hash / ID:</label>
+                        <input id="tx-hash-input" type="text" placeholder="Paste the crypto transaction hash here..."
+                               class="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-transparent outline-none">
+                    </div>
+
                     <!-- I've Paid button -->
-                    <button id="paid-btn" onclick="notifyPaid()" class="w-full py-2.5 mt-3 bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded-lg transition-all shadow-sm flex items-center justify-center gap-2">
+                    <button id="paid-btn" onclick="notifyPaid()" class="w-full py-2.5 mt-2 bg-green-600 hover:bg-green-700 text-white text-xs font-bold rounded-lg transition-all shadow-sm flex items-center justify-center gap-2">
                         <i class="fas fa-check-circle"></i> I'VE PAID
                     </button>
-                    <p id="paid-status" class="text-[9px] text-slate-400 text-center mt-1 hidden">Notification sent. Admin will verify your payment.</p>
+                    <p id="paid-status" class="text-[9px] text-slate-400 text-center mt-1 hidden"></p>
                 </div>
             </div>
         </div>
@@ -458,8 +465,10 @@ HTML_TEMPLATE = """
                 const pdata = await pres.json();
                 topupReqId = pdata.id;
 
-                // Show step 2
-                document.getElementById('topup-amount-display').textContent = amount;
+                // Show step 2 with BTC + USD amounts
+                const btcAmt = (wallets.btc_price > 0) ? (amount / wallets.btc_price) : 0;
+                document.getElementById('topup-amount-display').textContent = btcAmt.toFixed(8);
+                document.getElementById('topup-amount-usd').textContent = amount;
                 document.getElementById('topup-step-1').classList.add('hidden');
                 document.getElementById('topup-step-2').classList.remove('hidden');
             } catch (e) {
@@ -481,19 +490,35 @@ HTML_TEMPLATE = """
 
         async function notifyPaid() {
             if (!topupReqId) return;
+            const txHash = document.getElementById('tx-hash-input').value.trim();
+            if (!txHash) {
+                document.getElementById('tx-hash-input').classList.add('border-red-500', 'ring-1', 'ring-red-500');
+                document.getElementById('tx-hash-input').focus();
+                return;
+            }
+            document.getElementById('tx-hash-input').classList.remove('border-red-500', 'ring-1', 'ring-red-500');
             document.getElementById('paid-btn').disabled = true;
             document.getElementById('paid-btn').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
             try {
-                await fetch('/api/topup/notify', {
+                const res = await fetch('/api/topup/notify', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({id: topupReqId, uid: window.USER_ID}),
+                    body: JSON.stringify({id: topupReqId, uid: window.USER_ID, tx_hash: txHash}),
                 });
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.error || 'Failed');
+                }
+                document.getElementById('paid-status').textContent = 'Notification sent. Admin will verify your payment using the transaction hash.';
                 document.getElementById('paid-status').classList.remove('hidden');
                 document.getElementById('paid-btn').innerHTML = '<i class="fas fa-check-circle"></i> NOTIFIED ✓';
             } catch (e) {
                 document.getElementById('paid-btn').disabled = false;
                 document.getElementById('paid-btn').innerHTML = '<i class="fas fa-check-circle"></i> I\\'VE PAID';
+                if (e.message) {
+                    document.getElementById('paid-status').textContent = 'Error: ' + e.message;
+                    document.getElementById('paid-status').classList.remove('hidden');
+                }
             }
         }
 
@@ -1156,17 +1181,31 @@ def api_topup_notify():
     data = request.get_json(silent=True) or {}
     req_id = int(data.get("id", 0))
     uid_str = str(data.get("uid", "anonymous")).strip()
+    tx_hash = str(data.get("tx_hash", "")).strip()
+    if not tx_hash:
+        return jsonify({"error": "Please provide the transaction hash/ID"}), 400
     req = get_payment_request(req_id)
     if not req:
         return jsonify({"error": "Payment request not found"}), 404
+
+    # Store tx_hash in the payment request
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE payment_requests SET tx_hash = %s, updated_at = now() WHERE id = %s",
+                        (tx_hash, req_id))
+        conn.commit()
+
     _notify_admin(
         f"✅ <b>User Clicked 'I\\'ve Paid'</b>\n"
         f"User: {uid_str}\n"
         f"Amount: ${float(req['amount_usd']):.2f}\n"
         f"Request ID: {req_id}\n"
-        f"Check your wallets and confirm."
+        f"Tx Hash: <code>{tx_hash}</code>\n"
+        f"Check your wallets and confirm:\n"
+        f"✅ Approve: https://{request.host}/api/admin/payment?id={req_id}&action=approve&secret={os.getenv('ADMIN_SECRET', '')}\n"
+        f"❌ Deny: https://{request.host}/api/admin/payment?id={req_id}&action=deny&secret={os.getenv('ADMIN_SECRET', '')}"
     )
-    return jsonify({"status": "notified"})
+    return jsonify({"status": "notified", "tx_hash": tx_hash})
 
 
 @app.route("/api/admin/payment")

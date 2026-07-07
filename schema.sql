@@ -20,11 +20,13 @@ CREATE TABLE IF NOT EXISTS balances (
 );
 
 -- Payment requests for admin approval
+ALTER TABLE payment_requests ADD COLUMN IF NOT EXISTS tx_hash TEXT DEFAULT '';
 CREATE TABLE IF NOT EXISTS payment_requests (
     id              SERIAL PRIMARY KEY,
     user_id         INTEGER NOT NULL,
     uid_str         TEXT NOT NULL DEFAULT '',
     amount_usd      DECIMAL(10,2) NOT NULL,
+    tx_hash         TEXT DEFAULT '',
     status          TEXT DEFAULT 'pending',
     admin_note      TEXT DEFAULT '',
     created_at      TIMESTAMPTZ DEFAULT now(),

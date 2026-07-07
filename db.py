@@ -234,14 +234,14 @@ def add_credits(user_id: int, amount: float):
         conn.commit()
 
 
-def create_payment_request(user_id: int, uid_str: str, amount_usd: float) -> dict:
+def create_payment_request(user_id: int, uid_str: str, amount_usd: float, tx_hash: str = "") -> dict:
     """Create a pending payment request for admin approval."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO payment_requests (user_id, uid_str, amount_usd, status)
-                   VALUES (%s, %s, %s, 'pending') RETURNING *""",
-                (user_id, uid_str, amount_usd),
+                """INSERT INTO payment_requests (user_id, uid_str, amount_usd, tx_hash, status)
+                   VALUES (%s, %s, %s, %s, 'pending') RETURNING *""",
+                (user_id, uid_str, amount_usd, tx_hash),
             )
             row = cur.fetchone()
         conn.commit()
