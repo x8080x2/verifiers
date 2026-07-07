@@ -215,9 +215,9 @@ HTML_TEMPLATE = """
                 <!-- ── Input Section (left) ── -->
                 <div class="w-4/12 p-3 border-r border-slate-100" id="inputZone">
                     <div class="flex items-center justify-between mb-2">
-                        <div class="flex flex-col items-end gap-0.5">
+                        <div class="flex items-center gap-2">
                             <span class="text-[8px] text-slate-400 italic leading-tight">Filters out Gmail, Yahoo, etc.</span>
-                            <label class="flex items-center gap-1 text-[9px] text-slate-500 cursor-pointer select-none">
+                            <label class="flex items-center gap-1 text-[9px] text-slate-500 cursor-pointer select-none whitespace-nowrap">
                                 <input type="checkbox" id="b2bCheck" class="w-3 h-3 rounded border-slate-300 text-brand-600">
                                 B2B Only
                             </label>
