@@ -87,6 +87,8 @@ HTML_TEMPLATE = """
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
     <script>
+        window.USER_ID = "__USER_ID__";
+
         tailwind.config = {
             theme: {
                 extend: {
@@ -443,6 +445,9 @@ HTML_TEMPLATE = """
             if (b2bCheck.checked) {
                 formData.append('filter_free', 'true');
             }
+            
+            // Add user ID for job isolation
+            formData.append('uid', window.USER_ID);
 
             try {
                 const response = await fetch('/validate', { method: 'POST', body: formData });
@@ -740,9 +745,9 @@ def public_url(path):
     return PUBLIC_BASE_URL + path
 
 
-def bulk_store_file(filename, content_bytes):
+def bulk_store_file(filename, content_bytes, user_id=1):
     cleanup_old_jobs(max_age_s=BULK_FILE_TTL_S)
-    return store_file(filename, content_bytes)
+    return store_file(filename, content_bytes, user_id=user_id)
 
 
 def bulk_api_upload(file_url):
@@ -804,7 +809,9 @@ def bulk_api_status(list_id):
 
 @app.route('/')
 def index():
-    return HTML_TEMPLATE
+    uid = request.args.get("uid", "anonymous")
+    template = HTML_TEMPLATE.replace("__USER_ID__", uid)
+    return template
 
 
 @app.after_request
@@ -985,6 +992,8 @@ def validate():
         return jsonify({"error": "No file selected"}), 400
 
     filter_free = request.form.get("filter_free") == "true"
+    uid_str = request.form.get("uid", "anonymous").strip()
+    uid_int = (abs(hash(uid_str)) % (2**31 - 1)) or 1
 
     try:
         content = file.stream.read().decode("utf-8", errors="ignore")
@@ -1026,14 +1035,14 @@ def validate():
     if len(payload_bytes) > BULK_MAX_FILE_BYTES:
         return jsonify({"error": f"List file too large (max {BULK_MAX_FILE_BYTES} bytes)"}), 400
 
-    token = bulk_store_file("bulk_list.txt", payload_bytes)
+    token = bulk_store_file("bulk_list.txt", payload_bytes, user_id=uid_int)
     file_url = public_url(f"/bulk/file/{token}.txt")
     list_id, err = bulk_api_upload(file_url)
     if err:
         get_file(token)  # verify it exists, will be cleaned up by TTL
         return jsonify({"error": err}), 400
 
-    create_job(list_id, len(submit_emails), filtered_total, invalid_total, token)
+    create_job(list_id, len(submit_emails), filtered_total, invalid_total, token, user_id=uid_int)
 
     return jsonify(
         {
